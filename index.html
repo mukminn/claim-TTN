@@ -77,17 +77,15 @@
   </div>
 
   <script type="module">
-    import { createAppKit } from "https://esm.sh/@reown/appkit@1";
-    import { EthersAdapter } from "https://esm.sh/@reown/appkit-adapter-ethers@1";
-    import { base } from "https://esm.sh/@reown/appkit/networks@1";
-
     let provider, signer;
     let modal;
+    let appKitInitPromise;
+    let baseNetwork;
     let scheduleIds = [];
     let selectedScheduleId = null;
 
     const CONFIG = {
-      reownProjectId: (localStorage.getItem("REOWN_PROJECT_ID") || "REOWN_PROJECT_ID"),
+      reownProjectId: (localStorage.getItem("REOWN_PROJECT_ID") || ""),
       contractAddress: "0x70Ca23c7f2b72DdF40E909B72aB9B43A9b5eEf51",
       abi: [
         "function getSchedulesForBeneficiary(address beneficiary) view returns (uint256[])",
@@ -99,14 +97,6 @@
       requiredChainName: "Base Mainnet",
       explorerTxBaseUrl: "https://basescan.org/tx/"
     };
-
-    if (CONFIG.reownProjectId === "REOWN_PROJECT_ID") {
-      const pid = prompt("Enter Reown Project ID (from dashboard.reown.com)");
-      if (pid && pid.trim()) {
-        CONFIG.reownProjectId = pid.trim();
-        localStorage.setItem("REOWN_PROJECT_ID", CONFIG.reownProjectId);
-      }
-    }
 
     const el = {
       contractAddress: document.getElementById("contractAddress"),
@@ -132,6 +122,16 @@
     function setStatus(text) {
       el.status.textContent = text;
     }
+
+    window.addEventListener("error", (e) => {
+      const msg = e?.message || String(e);
+      setStatus("Runtime error: " + msg);
+    });
+
+    window.addEventListener("unhandledrejection", (e) => {
+      const reason = e?.reason?.message || e?.reason || String(e);
+      setStatus("Promise error: " + reason);
+    });
 
     function setConnectedUI(address) {
       const connected = !!address;
@@ -229,6 +229,92 @@
       if (!err) return "Unknown error";
       const msg = err?.shortMessage || err?.reason || err?.message || String(err);
       return msg;
+    }
+
+    async function ensureAppKitReady() {
+      if (modal) return;
+
+      if (!CONFIG.reownProjectId) {
+        const pid = prompt("Enter Reown Project ID (dashboard.reown.com)");
+        if (!pid || !pid.trim()) {
+          throw new Error("Missing Reown Project ID");
+        }
+        CONFIG.reownProjectId = pid.trim();
+        localStorage.setItem("REOWN_PROJECT_ID", CONFIG.reownProjectId);
+      }
+
+      if (appKitInitPromise) {
+        await appKitInitPromise;
+        return;
+      }
+
+      appKitInitPromise = (async () => {
+        setStatus("Loading wallet connector...");
+
+        const [{ createAppKit }, { EthersAdapter }, networks] = await Promise.all([
+          import("https://esm.sh/@reown/appkit@1"),
+          import("https://esm.sh/@reown/appkit-adapter-ethers@1"),
+          import("https://esm.sh/@reown/appkit/networks@1")
+        ]);
+
+        baseNetwork = networks.base;
+
+        const metadata = {
+          name: "Claim TTN",
+          description: "Claim vesting tokens",
+          url: window.location.origin,
+          icons: ["https://avatars.githubusercontent.com/u/179229932"]
+        };
+
+        modal = createAppKit({
+          adapters: [new EthersAdapter()],
+          networks: [baseNetwork],
+          defaultNetwork: baseNetwork,
+          metadata,
+          projectId: CONFIG.reownProjectId,
+          features: { analytics: true }
+        });
+
+        modal.subscribeProvider(async ({ provider: walletProvider, address, error, chainId, isConnected }) => {
+          if (error) {
+            setStatus("Wallet error: " + normalizeError(error));
+          }
+
+          if (!isConnected || !walletProvider || !address) {
+            provider = undefined;
+            signer = undefined;
+            el.walletAddress.textContent = "-";
+            setConnectedUI(null);
+            scheduleIds = [];
+            selectedScheduleId = null;
+            setScheduleButtonLabel();
+            el.scheduleBtn.disabled = true;
+            el.refreshSchedulesBtn.disabled = true;
+            el.vestingInfo.textContent = "-";
+            el.claimBtn.disabled = true;
+            await refreshChainUI();
+            return;
+          }
+
+          try {
+            provider = new ethers.BrowserProvider(walletProvider);
+            signer = await provider.getSigner();
+            el.walletAddress.textContent = address;
+            setConnectedUI(address);
+            el.networkBadge.textContent = "ChainId " + Number(chainId);
+            setStatus("Connected: " + address);
+            await refreshChainUI();
+            await loadSchedules();
+          } catch (e) {
+            provider = undefined;
+            signer = undefined;
+            setConnectedUI(null);
+            setStatus("Provider init failed: " + normalizeError(e));
+          }
+        });
+      })();
+
+      await appKitInitPromise;
     }
 
     function formatAmount(value) {
@@ -408,18 +494,9 @@
     async function connectWallet() {
       setTxLink(null);
 
-      if (!modal) {
-        setStatus("Wallet connector not initialized.");
-        return;
-      }
-
-      if (CONFIG.reownProjectId === "REOWN_PROJECT_ID") {
-        setStatus("Set CONFIG.reownProjectId first.");
-        return;
-      }
-
       try {
         el.connectBtn.disabled = true;
+        await ensureAppKitReady();
         setStatus("Opening wallet modal...");
         await modal.open();
       } catch (err) {
@@ -438,9 +515,8 @@
       try {
         el.switchBtn.disabled = true;
         setStatus("Switching network...");
-        if (modal) {
-          await modal.switchNetwork(base);
-        }
+        await ensureAppKitReady();
+        if (modal && baseNetwork) await modal.switchNetwork(baseNetwork);
         await refreshChainUI();
         setStatus("Network switched.");
       } catch (err) {
@@ -505,64 +581,6 @@
     });
     el.scheduleBackdrop.addEventListener("click", closeScheduleModal);
     el.scheduleClose.addEventListener("click", closeScheduleModal);
-
-    const metadata = {
-      name: "Claim TTN",
-      description: "Claim vesting tokens",
-      url: window.location.origin,
-      icons: ["https://avatars.githubusercontent.com/u/179229932"]
-    };
-
-    if (CONFIG.reownProjectId !== "REOWN_PROJECT_ID") {
-      modal = createAppKit({
-        adapters: [new EthersAdapter()],
-        networks: [base],
-        defaultNetwork: base,
-        metadata,
-        projectId: CONFIG.reownProjectId,
-        features: { analytics: true }
-      });
-
-      modal.subscribeProvider(async ({ provider: walletProvider, address, error, chainId, isConnected }) => {
-        if (error) {
-          setStatus("Wallet error: " + normalizeError(error));
-        }
-
-        if (!isConnected || !walletProvider || !address) {
-          provider = undefined;
-          signer = undefined;
-          el.walletAddress.textContent = "-";
-          setConnectedUI(null);
-          scheduleIds = [];
-          selectedScheduleId = null;
-          setScheduleButtonLabel();
-          el.scheduleBtn.disabled = true;
-          el.refreshSchedulesBtn.disabled = true;
-          el.vestingInfo.textContent = "-";
-          el.claimBtn.disabled = true;
-          await refreshChainUI();
-          return;
-        }
-
-        try {
-          provider = new ethers.BrowserProvider(walletProvider);
-          signer = await provider.getSigner();
-          el.walletAddress.textContent = address;
-          setConnectedUI(address);
-          el.networkBadge.textContent = "ChainId " + Number(chainId);
-          setStatus("Connected: " + address);
-          await refreshChainUI();
-          await loadSchedules();
-        } catch (e) {
-          provider = undefined;
-          signer = undefined;
-          setConnectedUI(null);
-          setStatus("Provider init failed: " + normalizeError(e));
-        }
-      });
-    } else {
-      setStatus("Set CONFIG.reownProjectId (Reown) to enable multi-wallet connect.");
-    }
 
     setScheduleButtonLabel();
   </script>

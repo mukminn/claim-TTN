@@ -6,6 +6,7 @@
   <title>Claim Vesting Token</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/ethers@6.10.0/dist/ethers.umd.min.js"></script>
+  <script src="https://unpkg.com/@walletconnect/ethereum-provider@2.12.2/dist/index.umd.js"></script>
 </head>
 
 <body class="min-h-screen bg-slate-950 text-slate-100">
@@ -76,11 +77,10 @@
     </div>
   </div>
 
-  <script type="module">
+  <script>
     let provider, signer;
-    let modal;
-    let appKitInitPromise;
-    let baseNetwork;
+    let externalProvider;
+    let providerEventsBound = false;
     let scheduleIds = [];
     let selectedScheduleId = null;
 
@@ -231,111 +231,100 @@
       return msg;
     }
 
-    async function ensureAppKitReady() {
-      if (modal) return;
+    function getEthereumProviderLib() {
+      return window.EthereumProvider || window.WalletConnectEthereumProvider?.EthereumProvider || window.WalletConnectEthereumProvider;
+    }
+
+    async function getExternalProvider() {
+      if (externalProvider) return externalProvider;
+
+      if (window.ethereum && window.ethereum.request) {
+        externalProvider = window.ethereum;
+        return externalProvider;
+      }
+
+      const EthereumProvider = getEthereumProviderLib();
+      if (!EthereumProvider || !EthereumProvider.init) {
+        throw new Error("WalletConnect provider library not available");
+      }
 
       if (!CONFIG.reownProjectId) {
-        const pid = prompt("Enter Reown Project ID (dashboard.reown.com)");
-        if (!pid || !pid.trim()) {
-          throw new Error("Missing Reown Project ID");
-        }
+        const pid = prompt("Enter WalletConnect Project ID");
+        if (!pid || !pid.trim()) throw new Error("Missing Project ID");
         CONFIG.reownProjectId = pid.trim();
         localStorage.setItem("REOWN_PROJECT_ID", CONFIG.reownProjectId);
       }
 
-      if (appKitInitPromise) {
-        await appKitInitPromise;
-        return;
-      }
+      externalProvider = await EthereumProvider.init({
+        projectId: CONFIG.reownProjectId,
+        chains: [CONFIG.requiredChainId],
+        optionalChains: [1],
+        showQrModal: true
+      });
 
-      appKitInitPromise = (async () => {
-        setStatus("Loading wallet connector...");
+      return externalProvider;
+    }
 
-        async function importReownFromEsmSh() {
-          return Promise.all([
-            import("https://esm.sh/@reown/appkit@1"),
-            import("https://esm.sh/@reown/appkit-adapter-ethers@1"),
-            import("https://esm.sh/@reown/appkit/networks@1")
-          ]);
+    function bindProviderEventsOnce(p) {
+      if (providerEventsBound || !p || !p.on) return;
+      providerEventsBound = true;
+
+      p.on("accountsChanged", async (accounts) => {
+        const address = accounts && accounts[0] ? accounts[0] : null;
+        if (!address) {
+          provider = undefined;
+          signer = undefined;
+          el.walletAddress.textContent = "-";
+          setConnectedUI(null);
+          scheduleIds = [];
+          selectedScheduleId = null;
+          setScheduleButtonLabel();
+          el.scheduleBtn.disabled = true;
+          el.refreshSchedulesBtn.disabled = true;
+          el.vestingInfo.textContent = "-";
+          el.claimBtn.disabled = true;
+          await refreshChainUI();
+          setStatus("Disconnected.");
+          return;
         }
 
-        async function importReownFromJsDelivr() {
-          return Promise.all([
-            import("https://cdn.jsdelivr.net/npm/@reown/appkit@1/+esm"),
-            import("https://cdn.jsdelivr.net/npm/@reown/appkit-adapter-ethers@1/+esm"),
-            import("https://cdn.jsdelivr.net/npm/@reown/appkit@1/networks/+esm")
-          ]);
-        }
+        provider = new ethers.BrowserProvider(p);
+        signer = await provider.getSigner();
+        el.walletAddress.textContent = address;
+        setConnectedUI(address);
+        setStatus("Account changed: " + address);
+        await refreshChainUI();
+        await loadSchedules();
+      });
 
-        let appkitMod, adapterMod, networks;
+      p.on("chainChanged", async () => {
         try {
-          [appkitMod, adapterMod, networks] = await importReownFromEsmSh();
-        } catch (e1) {
-          setStatus("Loading wallet connector... (fallback)");
-          [appkitMod, adapterMod, networks] = await importReownFromJsDelivr();
+          provider = new ethers.BrowserProvider(p);
+          signer = await provider.getSigner();
+        } catch {
+          signer = undefined;
         }
+        await refreshChainUI();
+        await loadSchedules();
+      });
 
-        const { createAppKit } = appkitMod;
-        const { EthersAdapter } = adapterMod;
-
-        baseNetwork = networks.base;
-
-        const metadata = {
-          name: "Claim TTN",
-          description: "Claim vesting tokens",
-          url: window.location.origin,
-          icons: ["https://avatars.githubusercontent.com/u/179229932"]
-        };
-
-        modal = createAppKit({
-          adapters: [new EthersAdapter()],
-          networks: [baseNetwork],
-          defaultNetwork: baseNetwork,
-          metadata,
-          projectId: CONFIG.reownProjectId,
-          features: { analytics: true }
-        });
-
-        modal.subscribeProvider(async ({ provider: walletProvider, address, error, chainId, isConnected }) => {
-          if (error) {
-            setStatus("Wallet error: " + normalizeError(error));
-          }
-
-          if (!isConnected || !walletProvider || !address) {
-            provider = undefined;
-            signer = undefined;
-            el.walletAddress.textContent = "-";
-            setConnectedUI(null);
-            scheduleIds = [];
-            selectedScheduleId = null;
-            setScheduleButtonLabel();
-            el.scheduleBtn.disabled = true;
-            el.refreshSchedulesBtn.disabled = true;
-            el.vestingInfo.textContent = "-";
-            el.claimBtn.disabled = true;
-            await refreshChainUI();
-            return;
-          }
-
-          try {
-            provider = new ethers.BrowserProvider(walletProvider);
-            signer = await provider.getSigner();
-            el.walletAddress.textContent = address;
-            setConnectedUI(address);
-            el.networkBadge.textContent = "ChainId " + Number(chainId);
-            setStatus("Connected: " + address);
-            await refreshChainUI();
-            await loadSchedules();
-          } catch (e) {
-            provider = undefined;
-            signer = undefined;
-            setConnectedUI(null);
-            setStatus("Provider init failed: " + normalizeError(e));
-          }
-        });
-      })();
-
-      await appKitInitPromise;
+      p.on("disconnect", async () => {
+        provider = undefined;
+        signer = undefined;
+        externalProvider = undefined;
+        providerEventsBound = false;
+        el.walletAddress.textContent = "-";
+        setConnectedUI(null);
+        scheduleIds = [];
+        selectedScheduleId = null;
+        setScheduleButtonLabel();
+        el.scheduleBtn.disabled = true;
+        el.refreshSchedulesBtn.disabled = true;
+        el.vestingInfo.textContent = "-";
+        el.claimBtn.disabled = true;
+        await refreshChainUI();
+        setStatus("Disconnected.");
+      });
     }
 
     function formatAmount(value) {
@@ -517,9 +506,21 @@
 
       try {
         el.connectBtn.disabled = true;
-        await ensureAppKitReady();
-        setStatus("Opening wallet modal...");
-        await modal.open();
+        setStatus("Connecting wallet...");
+
+        const ext = await getExternalProvider();
+        bindProviderEventsOnce(ext);
+
+        await ext.request({ method: "eth_requestAccounts" });
+        provider = new ethers.BrowserProvider(ext);
+        signer = await provider.getSigner();
+
+        const address = await signer.getAddress();
+        el.walletAddress.textContent = address;
+        setConnectedUI(address);
+        setStatus("Connected: " + address);
+        await refreshChainUI();
+        await loadSchedules();
       } catch (err) {
         setStatus("Connect failed: " + normalizeError(err));
       } finally {
@@ -536,8 +537,12 @@
       try {
         el.switchBtn.disabled = true;
         setStatus("Switching network...");
-        await ensureAppKitReady();
-        if (modal && baseNetwork) await modal.switchNetwork(baseNetwork);
+        const ext = await getExternalProvider();
+        bindProviderEventsOnce(ext);
+        await ext.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: "0x" + Number(CONFIG.requiredChainId).toString(16) }]
+        });
         await refreshChainUI();
         setStatus("Network switched.");
       } catch (err) {

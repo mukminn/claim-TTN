@@ -251,11 +251,32 @@
       appKitInitPromise = (async () => {
         setStatus("Loading wallet connector...");
 
-        const [{ createAppKit }, { EthersAdapter }, networks] = await Promise.all([
-          import("https://esm.sh/@reown/appkit@1"),
-          import("https://esm.sh/@reown/appkit-adapter-ethers@1"),
-          import("https://esm.sh/@reown/appkit/networks@1")
-        ]);
+        async function importReownFromEsmSh() {
+          return Promise.all([
+            import("https://esm.sh/@reown/appkit@1"),
+            import("https://esm.sh/@reown/appkit-adapter-ethers@1"),
+            import("https://esm.sh/@reown/appkit/networks@1")
+          ]);
+        }
+
+        async function importReownFromJsDelivr() {
+          return Promise.all([
+            import("https://cdn.jsdelivr.net/npm/@reown/appkit@1/+esm"),
+            import("https://cdn.jsdelivr.net/npm/@reown/appkit-adapter-ethers@1/+esm"),
+            import("https://cdn.jsdelivr.net/npm/@reown/appkit@1/networks/+esm")
+          ]);
+        }
+
+        let appkitMod, adapterMod, networks;
+        try {
+          [appkitMod, adapterMod, networks] = await importReownFromEsmSh();
+        } catch (e1) {
+          setStatus("Loading wallet connector... (fallback)");
+          [appkitMod, adapterMod, networks] = await importReownFromJsDelivr();
+        }
+
+        const { createAppKit } = appkitMod;
+        const { EthersAdapter } = adapterMod;
 
         baseNetwork = networks.base;
 

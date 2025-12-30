@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Claim Vesting Token</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.10.0/dist/ethers.umd.min.js"></script>
+</head>
+
+<body class="min-h-screen bg-slate-950 text-slate-100">
+  <div class="mx-auto max-w-xl px-6 py-12">
+    <div class="rounded-2xl border border-slate-800 bg-slate-900/40 p-6 shadow-xl">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h1 class="text-2xl font-semibold tracking-tight">Claim Vesting</h1>
+          <p class="mt-1 text-sm text-slate-300">Connect your wallet and claim your vested tokens.</p>
+        </div>
+        <div class="text-right">
+          <div id="networkBadge" class="inline-flex items-center rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-200">Not connected</div>
+        </div>
+      </div>
+
+      <div class="mt-6 space-y-4">
+        <div class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Contract</div>
+          <div id="contractAddress" class="mt-1 break-all font-mono text-sm text-slate-200"></div>
+        </div>
+
+        <div class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Vesting Schedule</div>
+          <select id="scheduleSelect" disabled class="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900 px-3 py-3 text-sm text-slate-100 disabled:cursor-not-allowed disabled:opacity-60"></select>
+          <button id="refreshSchedulesBtn" disabled class="mt-3 w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm font-semibold text-slate-100 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60">Refresh Schedules</button>
+        </div>
+
+        <div class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Vesting Info</div>
+          <div id="vestingInfo" class="mt-2 whitespace-pre-wrap font-mono text-sm text-slate-200">-</div>
+        </div>
+
+        <div class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Wallet</div>
+          <div id="walletAddress" class="mt-1 break-all font-mono text-sm text-slate-200">-</div>
+          <div id="chainInfo" class="mt-2 text-sm text-slate-300">-</div>
+        </div>
+
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <button id="connectBtn" class="inline-flex items-center justify-center rounded-xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60">Connect Wallet</button>
+          <button id="claimBtn" disabled class="inline-flex items-center justify-center rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60">Claim</button>
+        </div>
+
+        <button id="switchBtn" class="hidden w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm font-semibold text-slate-100 hover:bg-slate-800">Switch Network</button>
+
+        <div class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Status</div>
+          <div id="status" class="mt-1 whitespace-pre-wrap text-sm text-slate-200">Ready.</div>
+          <a id="txLink" class="mt-2 hidden break-all text-sm text-indigo-300 underline" target="_blank" rel="noreferrer"></a>
+        </div>
+      </div>
+
+      <div class="mt-6 text-xs text-slate-400">
+        <div>Tip: If claim fails, confirm you are on the correct network and that your wallet is eligible.</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let provider, signer;
+
+    const CONFIG = {
+      contractAddress: "0x70Ca23c7f2b72DdF40E909B72aB9B43A9b5eEf51",
+      abi: [
+        "function getSchedulesForBeneficiary(address beneficiary) view returns (uint256[])",
+        "function getVestingInfo(uint256 scheduleId) view returns (uint256 totalAmount, uint256 releasedAmount, uint256 releasableAmount, uint256 remainingAmount, uint256 nextUnlockTime)",
+        "function claimVestedTokens(uint256 scheduleId) returns (uint256)"
+      ],
+      claimMethod: "claimVestedTokens",
+      requiredChainId: 8453,
+      requiredChainName: "Base Mainnet",
+      explorerTxBaseUrl: "https://basescan.org/tx/"
+    };
+
+    const el = {
+      contractAddress: document.getElementById("contractAddress"),
+      walletAddress: document.getElementById("walletAddress"),
+      chainInfo: document.getElementById("chainInfo"),
+      scheduleSelect: document.getElementById("scheduleSelect"),
+      refreshSchedulesBtn: document.getElementById("refreshSchedulesBtn"),
+      vestingInfo: document.getElementById("vestingInfo"),
+      status: document.getElementById("status"),
+      txLink: document.getElementById("txLink"),
+      connectBtn: document.getElementById("connectBtn"),
+      claimBtn: document.getElementById("claimBtn"),
+      switchBtn: document.getElementById("switchBtn"),
+      networkBadge: document.getElementById("networkBadge")
+    };
+
+    el.contractAddress.textContent = CONFIG.contractAddress;
+
+    function setStatus(text) {
+      el.status.textContent = text;
+    }
+
+    function setConnectedUI(address) {
+      const connected = !!address;
+      if (connected) {
+        el.connectBtn.textContent = "Connected: " + shortAddr(address);
+        el.connectBtn.classList.remove("bg-indigo-600", "hover:bg-indigo-500");
+        el.connectBtn.classList.add("bg-slate-700");
+      } else {
+        el.connectBtn.textContent = "Connect Wallet";
+        el.connectBtn.classList.remove("bg-slate-700");
+        el.connectBtn.classList.add("bg-indigo-600", "hover:bg-indigo-500");
+      }
+    }
+
+    function setTxLink(txHash) {
+      if (!txHash) {
+        el.txLink.classList.add("hidden");
+        el.txLink.removeAttribute("href");
+        el.txLink.textContent = "";
+        return;
+      }
+
+      el.txLink.classList.remove("hidden");
+      const href = CONFIG.explorerTxBaseUrl ? (CONFIG.explorerTxBaseUrl + txHash) : "";
+      if (href) {
+        el.txLink.href = href;
+        el.txLink.textContent = "View transaction: " + href;
+      } else {
+        el.txLink.removeAttribute("href");
+        el.txLink.textContent = "Transaction hash: " + txHash;
+      }
+    }
+
+    function shortAddr(addr) {
+      if (!addr) return "-";
+      return addr.slice(0, 6) + "..." + addr.slice(-4);
+    }
+
+    function normalizeError(err) {
+      if (!err) return "Unknown error";
+      const msg = err?.shortMessage || err?.reason || err?.message || String(err);
+      return msg;
+    }
+
+    function formatAmount(value) {
+      try {
+        return ethers.formatUnits(value, 18);
+      } catch {
+        return String(value);
+      }
+    }
+
+    function formatTime(sec) {
+      let n;
+      try {
+        n = Number(sec);
+      } catch {
+        return String(sec);
+      }
+
+      if (!Number.isFinite(n)) return String(sec);
+      if (n === 0) return "0 (no upcoming unlock)";
+      if (n < 0) return String(n);
+
+      const d = new Date(n * 1000);
+      const local = d.toLocaleString("id-ID", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit"
+      });
+
+      return n + " | " + local;
+    }
+
+    function getSelectedScheduleId() {
+      const v = el.scheduleSelect?.value;
+      if (!v) return null;
+      try {
+        return BigInt(v);
+      } catch {
+        return null;
+      }
+    }
+
+    async function getReadContract() {
+      if (!provider) throw new Error("Provider not ready");
+      return new ethers.Contract(CONFIG.contractAddress, CONFIG.abi, provider);
+    }
+
+    async function getWriteContract() {
+      if (!signer) throw new Error("Signer not ready");
+      return new ethers.Contract(CONFIG.contractAddress, CONFIG.abi, signer);
+    }
+
+    async function loadVestingInfo(scheduleId) {
+      if (scheduleId === null || scheduleId === undefined) {
+        el.vestingInfo.textContent = "-";
+        el.claimBtn.disabled = true;
+        return;
+      }
+
+      try {
+        const c = await getReadContract();
+        const info = await c.getVestingInfo(scheduleId);
+        const text =
+          "scheduleId: " + scheduleId.toString() + "\n" +
+          "totalAmount: " + formatAmount(info.totalAmount) + "\n" +
+          "releasedAmount: " + formatAmount(info.releasedAmount) + "\n" +
+          "releasableAmount: " + formatAmount(info.releasableAmount) + "\n" +
+          "remainingAmount: " + formatAmount(info.remainingAmount) + "\n" +
+          "nextUnlockTime: " + formatTime(info.nextUnlockTime);
+        el.vestingInfo.textContent = text;
+
+        const releasable = BigInt(info.releasableAmount);
+        el.claimBtn.disabled = !signer || releasable === 0n;
+      } catch (err) {
+        el.vestingInfo.textContent = "Failed to load vesting info: " + normalizeError(err);
+        el.claimBtn.disabled = true;
+      }
+    }
+
+    async function loadSchedules() {
+      setTxLink(null);
+      if (!provider || !signer) {
+        el.scheduleSelect.innerHTML = "";
+        el.scheduleSelect.disabled = true;
+        el.refreshSchedulesBtn.disabled = true;
+        el.vestingInfo.textContent = "-";
+        el.claimBtn.disabled = true;
+        return;
+      }
+
+      await refreshChainUI();
+      if (!el.switchBtn.classList.contains("hidden")) {
+        el.scheduleSelect.innerHTML = "";
+        el.scheduleSelect.disabled = true;
+        el.refreshSchedulesBtn.disabled = true;
+        el.vestingInfo.textContent = "-";
+        el.claimBtn.disabled = true;
+        return;
+      }
+
+      try {
+        el.scheduleSelect.disabled = true;
+        el.refreshSchedulesBtn.disabled = true;
+        el.scheduleSelect.innerHTML = "";
+        el.vestingInfo.textContent = "Loading schedules...";
+
+        const address = await signer.getAddress();
+        const c = await getReadContract();
+        const ids = await c.getSchedulesForBeneficiary(address);
+
+        if (!ids || ids.length === 0) {
+          el.scheduleSelect.innerHTML = "<option value=\"\">No schedules found</option>";
+          el.scheduleSelect.disabled = true;
+          el.vestingInfo.textContent = "No schedules found for: " + address;
+          el.claimBtn.disabled = true;
+          return;
+        }
+
+        const opts = ids.map((id) => {
+          const v = id.toString();
+          return "<option value=\"" + v + "\">Schedule #" + v + "</option>";
+        }).join("");
+        el.scheduleSelect.innerHTML = opts;
+        el.scheduleSelect.disabled = false;
+        el.refreshSchedulesBtn.disabled = false;
+
+        const selected = getSelectedScheduleId();
+        await loadVestingInfo(selected);
+      } catch (err) {
+        el.scheduleSelect.innerHTML = "";
+        el.scheduleSelect.disabled = true;
+        el.refreshSchedulesBtn.disabled = true;
+        el.vestingInfo.textContent = "Failed to load schedules: " + normalizeError(err);
+        el.claimBtn.disabled = true;
+      }
+    }
+
+    async function refreshChainUI() {
+      if (!provider) {
+        el.chainInfo.textContent = "-";
+        el.networkBadge.textContent = "Not connected";
+        el.switchBtn.classList.add("hidden");
+        el.claimBtn.disabled = true;
+        return;
+      }
+
+      const network = await provider.getNetwork();
+      const currentChainId = Number(network.chainId);
+      const chainLabel = network.name ? network.name : "unknown";
+
+      el.chainInfo.textContent = "Network: " + chainLabel + " (chainId " + currentChainId + ")";
+      el.networkBadge.textContent = "ChainId " + currentChainId;
+
+      const needsChain = CONFIG.requiredChainId !== null && CONFIG.requiredChainId !== undefined;
+      const chainOk = !needsChain || currentChainId === Number(CONFIG.requiredChainId);
+
+      if (!chainOk) {
+        el.networkBadge.textContent = "Wrong network";
+        el.switchBtn.classList.remove("hidden");
+        el.claimBtn.disabled = true;
+        if (CONFIG.requiredChainName) {
+          setStatus("Wrong network. Please switch to: " + CONFIG.requiredChainName + " (" + CONFIG.requiredChainId + ")");
+        } else {
+          setStatus("Wrong network. Please switch to chainId: " + CONFIG.requiredChainId);
+        }
+      } else {
+        el.switchBtn.classList.add("hidden");
+        el.claimBtn.disabled = !signer;
+      }
+    }
+
+    async function connectWallet() {
+      setTxLink(null);
+
+      if (!window.ethereum) {
+        alert("Please install MetaMask (or another EVM wallet).");
+        return;
+      }
+
+      try {
+        el.connectBtn.disabled = true;
+        setStatus("Requesting wallet connection...");
+
+        await window.ethereum.request({ method: "eth_requestAccounts" });
+        provider = new ethers.BrowserProvider(window.ethereum);
+        signer = await provider.getSigner();
+
+        const address = await signer.getAddress();
+        el.walletAddress.textContent = address;
+        setConnectedUI(address);
+
+        setStatus("Connected: " + address);
+        await refreshChainUI();
+        await loadSchedules();
+      } catch (err) {
+        signer = undefined;
+        provider = undefined;
+        setConnectedUI(null);
+        setStatus("Connect failed: " + normalizeError(err));
+      } finally {
+        el.connectBtn.disabled = false;
+      }
+    }
+
+    async function switchNetwork() {
+      if (!window.ethereum) return;
+      if (CONFIG.requiredChainId === null || CONFIG.requiredChainId === undefined) {
+        setStatus("No requiredChainId set in CONFIG.");
+        return;
+      }
+
+      try {
+        el.switchBtn.disabled = true;
+        setStatus("Switching network...");
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: "0x" + Number(CONFIG.requiredChainId).toString(16) }]
+        });
+        await refreshChainUI();
+        setStatus("Network switched.");
+      } catch (err) {
+        setStatus("Network switch failed: " + normalizeError(err));
+      } finally {
+        el.switchBtn.disabled = false;
+      }
+    }
+
+    async function claimToken() {
+      setTxLink(null);
+
+      if (!signer || !provider) {
+        alert("Connect wallet first.");
+        return;
+      }
+
+      await refreshChainUI();
+      if (!el.switchBtn.classList.contains("hidden")) {
+        return;
+      }
+
+      const scheduleId = getSelectedScheduleId();
+      if (scheduleId === null || scheduleId === undefined) {
+        setStatus("Select a schedule first.");
+        return;
+      }
+
+      const contract = await getWriteContract();
+      const fn = contract[CONFIG.claimMethod];
+      if (typeof fn !== "function") {
+        setStatus("Contract method not found: " + CONFIG.claimMethod);
+        return;
+      }
+
+      try {
+        el.claimBtn.disabled = true;
+        setStatus("Sending transaction...");
+
+        const tx = await fn(scheduleId);
+        setTxLink(tx.hash);
+        setStatus("Transaction sent: " + tx.hash + "\nWaiting for confirmation...");
+
+        const receipt = await tx.wait();
+        setStatus("Claim confirmed.\nTx: " + receipt.hash);
+        await loadSchedules();
+      } catch (err) {
+        setStatus("Claim failed: " + normalizeError(err));
+      } finally {
+        el.claimBtn.disabled = false;
+      }
+    }
+
+    el.connectBtn.addEventListener("click", connectWallet);
+    el.claimBtn.addEventListener("click", claimToken);
+    el.switchBtn.addEventListener("click", switchNetwork);
+    el.refreshSchedulesBtn.addEventListener("click", loadSchedules);
+    el.scheduleSelect.addEventListener("change", async () => {
+      const selected = getSelectedScheduleId();
+      await loadVestingInfo(selected);
+    });
+
+    if (window.ethereum) {
+      window.ethereum.on("accountsChanged", async () => {
+        signer = undefined;
+        provider = new ethers.BrowserProvider(window.ethereum);
+        try {
+          signer = await provider.getSigner();
+          const address = await signer.getAddress();
+          el.walletAddress.textContent = address;
+          setConnectedUI(address);
+          setStatus("Account changed: " + address);
+        } catch {
+          el.walletAddress.textContent = "-";
+          setConnectedUI(null);
+          setStatus("Disconnected.");
+        }
+        await refreshChainUI();
+        await loadSchedules();
+      });
+
+      window.ethereum.on("chainChanged", async () => {
+        provider = new ethers.BrowserProvider(window.ethereum);
+        try {
+          signer = await provider.getSigner();
+        } catch {
+          signer = undefined;
+        }
+        await refreshChainUI();
+        await loadSchedules();
+      });
+    }
+  </script>
+</body>
+</html>

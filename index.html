@@ -87,7 +87,7 @@
     let selectedScheduleId = null;
 
     const CONFIG = {
-      reownProjectId: "REOWN_PROJECT_ID",
+      reownProjectId: (localStorage.getItem("REOWN_PROJECT_ID") || "REOWN_PROJECT_ID"),
       contractAddress: "0x70Ca23c7f2b72DdF40E909B72aB9B43A9b5eEf51",
       abi: [
         "function getSchedulesForBeneficiary(address beneficiary) view returns (uint256[])",
@@ -99,6 +99,14 @@
       requiredChainName: "Base Mainnet",
       explorerTxBaseUrl: "https://basescan.org/tx/"
     };
+
+    if (CONFIG.reownProjectId === "REOWN_PROJECT_ID") {
+      const pid = prompt("Enter Reown Project ID (from dashboard.reown.com)");
+      if (pid && pid.trim()) {
+        CONFIG.reownProjectId = pid.trim();
+        localStorage.setItem("REOWN_PROJECT_ID", CONFIG.reownProjectId);
+      }
+    }
 
     const el = {
       contractAddress: document.getElementById("contractAddress"),

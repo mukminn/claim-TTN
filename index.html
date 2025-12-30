@@ -29,7 +29,7 @@
 
         <div class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
           <div class="text-xs uppercase tracking-wide text-slate-400">Vesting Schedule</div>
-          <select id="scheduleSelect" disabled class="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900 px-3 py-3 text-sm text-slate-100 disabled:cursor-not-allowed disabled:opacity-60"></select>
+          <button id="scheduleBtn" disabled class="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-left text-sm font-semibold text-slate-100 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60">Select schedule</button>
           <button id="refreshSchedulesBtn" disabled class="mt-3 w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm font-semibold text-slate-100 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60">Refresh Schedules</button>
         </div>
 
@@ -64,10 +64,30 @@
     </div>
   </div>
 
-  <script>
+  <div id="scheduleModal" class="fixed inset-0 z-50 hidden">
+    <div id="scheduleBackdrop" class="absolute inset-0 bg-black/70"></div>
+    <div class="relative mx-auto mt-24 w-[92vw] max-w-lg rounded-2xl border border-slate-800 bg-slate-950 p-4 shadow-2xl">
+      <div class="flex items-center justify-between gap-3">
+        <div class="text-base font-semibold">Select Vesting Schedule</div>
+        <button id="scheduleClose" class="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm font-semibold text-slate-100 hover:bg-slate-800">Close</button>
+      </div>
+      <div class="mt-3 text-xs text-slate-400">Tap a schedule to view details and claim.</div>
+      <div id="scheduleList" class="mt-4 max-h-[55vh] overflow-auto rounded-xl border border-slate-800 bg-slate-900/30"></div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { createAppKit } from "https://esm.sh/@reown/appkit@1";
+    import { EthersAdapter } from "https://esm.sh/@reown/appkit-adapter-ethers@1";
+    import { base } from "https://esm.sh/@reown/appkit/networks@1";
+
     let provider, signer;
+    let modal;
+    let scheduleIds = [];
+    let selectedScheduleId = null;
 
     const CONFIG = {
+      reownProjectId: "REOWN_PROJECT_ID",
       contractAddress: "0x70Ca23c7f2b72DdF40E909B72aB9B43A9b5eEf51",
       abi: [
         "function getSchedulesForBeneficiary(address beneficiary) view returns (uint256[])",
@@ -84,7 +104,7 @@
       contractAddress: document.getElementById("contractAddress"),
       walletAddress: document.getElementById("walletAddress"),
       chainInfo: document.getElementById("chainInfo"),
-      scheduleSelect: document.getElementById("scheduleSelect"),
+      scheduleBtn: document.getElementById("scheduleBtn"),
       refreshSchedulesBtn: document.getElementById("refreshSchedulesBtn"),
       vestingInfo: document.getElementById("vestingInfo"),
       status: document.getElementById("status"),
@@ -92,7 +112,11 @@
       connectBtn: document.getElementById("connectBtn"),
       claimBtn: document.getElementById("claimBtn"),
       switchBtn: document.getElementById("switchBtn"),
-      networkBadge: document.getElementById("networkBadge")
+      networkBadge: document.getElementById("networkBadge"),
+      scheduleModal: document.getElementById("scheduleModal"),
+      scheduleBackdrop: document.getElementById("scheduleBackdrop"),
+      scheduleClose: document.getElementById("scheduleClose"),
+      scheduleList: document.getElementById("scheduleList")
     };
 
     el.contractAddress.textContent = CONFIG.contractAddress;
@@ -138,6 +162,61 @@
       return addr.slice(0, 6) + "..." + addr.slice(-4);
     }
 
+    function openScheduleModal() {
+      el.scheduleModal.classList.remove("hidden");
+    }
+
+    function closeScheduleModal() {
+      el.scheduleModal.classList.add("hidden");
+    }
+
+    function setScheduleButtonLabel() {
+      if (!selectedScheduleId) {
+        el.scheduleBtn.textContent = "Select schedule";
+        return;
+      }
+      el.scheduleBtn.textContent = "Schedule #" + selectedScheduleId.toString();
+    }
+
+    function renderScheduleList() {
+      if (!scheduleIds || scheduleIds.length === 0) {
+        el.scheduleList.innerHTML = "<div class=\"p-4 text-sm text-slate-300\">No schedules found</div>";
+        return;
+      }
+
+      const items = scheduleIds.map((id) => {
+        const v = id.toString();
+        const active = selectedScheduleId && v === selectedScheduleId.toString();
+        const cls = active
+          ? "bg-indigo-600/30 border-indigo-500"
+          : "bg-slate-950/30 border-slate-800 hover:bg-slate-900/40";
+
+        return (
+          "<button data-sid=\"" + v + "\" class=\"w-full text-left px-4 py-3 border-b last:border-b-0 " + cls + "\">" +
+          "<div class=\"flex items-center justify-between\">" +
+          "<div class=\"font-semibold text-slate-100\">Schedule #" + v + "</div>" +
+          (active ? "<div class=\"text-xs text-indigo-200\">Selected</div>" : "") +
+          "</div>" +
+          "</button>"
+        );
+      }).join("");
+
+      el.scheduleList.innerHTML = items;
+      el.scheduleList.querySelectorAll("button[data-sid]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const sid = btn.getAttribute("data-sid");
+          try {
+            selectedScheduleId = BigInt(sid);
+          } catch {
+            selectedScheduleId = null;
+          }
+          setScheduleButtonLabel();
+          closeScheduleModal();
+          await loadVestingInfo(selectedScheduleId);
+        });
+      });
+    }
+
     function normalizeError(err) {
       if (!err) return "Unknown error";
       const msg = err?.shortMessage || err?.reason || err?.message || String(err);
@@ -178,13 +257,7 @@
     }
 
     function getSelectedScheduleId() {
-      const v = el.scheduleSelect?.value;
-      if (!v) return null;
-      try {
-        return BigInt(v);
-      } catch {
-        return null;
-      }
+      return selectedScheduleId;
     }
 
     async function getReadContract() {
@@ -227,8 +300,10 @@
     async function loadSchedules() {
       setTxLink(null);
       if (!provider || !signer) {
-        el.scheduleSelect.innerHTML = "";
-        el.scheduleSelect.disabled = true;
+        scheduleIds = [];
+        selectedScheduleId = null;
+        setScheduleButtonLabel();
+        el.scheduleBtn.disabled = true;
         el.refreshSchedulesBtn.disabled = true;
         el.vestingInfo.textContent = "-";
         el.claimBtn.disabled = true;
@@ -237,8 +312,10 @@
 
       await refreshChainUI();
       if (!el.switchBtn.classList.contains("hidden")) {
-        el.scheduleSelect.innerHTML = "";
-        el.scheduleSelect.disabled = true;
+        scheduleIds = [];
+        selectedScheduleId = null;
+        setScheduleButtonLabel();
+        el.scheduleBtn.disabled = true;
         el.refreshSchedulesBtn.disabled = true;
         el.vestingInfo.textContent = "-";
         el.claimBtn.disabled = true;
@@ -246,9 +323,11 @@
       }
 
       try {
-        el.scheduleSelect.disabled = true;
+        el.scheduleBtn.disabled = true;
         el.refreshSchedulesBtn.disabled = true;
-        el.scheduleSelect.innerHTML = "";
+        scheduleIds = [];
+        selectedScheduleId = null;
+        setScheduleButtonLabel();
         el.vestingInfo.textContent = "Loading schedules...";
 
         const address = await signer.getAddress();
@@ -256,26 +335,28 @@
         const ids = await c.getSchedulesForBeneficiary(address);
 
         if (!ids || ids.length === 0) {
-          el.scheduleSelect.innerHTML = "<option value=\"\">No schedules found</option>";
-          el.scheduleSelect.disabled = true;
+          scheduleIds = [];
+          selectedScheduleId = null;
+          setScheduleButtonLabel();
+          el.scheduleBtn.disabled = true;
           el.vestingInfo.textContent = "No schedules found for: " + address;
           el.claimBtn.disabled = true;
           return;
         }
 
-        const opts = ids.map((id) => {
-          const v = id.toString();
-          return "<option value=\"" + v + "\">Schedule #" + v + "</option>";
-        }).join("");
-        el.scheduleSelect.innerHTML = opts;
-        el.scheduleSelect.disabled = false;
+        scheduleIds = ids;
+        selectedScheduleId = BigInt(ids[0].toString());
+        setScheduleButtonLabel();
+        renderScheduleList();
+        el.scheduleBtn.disabled = false;
         el.refreshSchedulesBtn.disabled = false;
 
-        const selected = getSelectedScheduleId();
-        await loadVestingInfo(selected);
+        await loadVestingInfo(selectedScheduleId);
       } catch (err) {
-        el.scheduleSelect.innerHTML = "";
-        el.scheduleSelect.disabled = true;
+        scheduleIds = [];
+        selectedScheduleId = null;
+        setScheduleButtonLabel();
+        el.scheduleBtn.disabled = true;
         el.refreshSchedulesBtn.disabled = true;
         el.vestingInfo.textContent = "Failed to load schedules: " + normalizeError(err);
         el.claimBtn.disabled = true;
@@ -319,30 +400,21 @@
     async function connectWallet() {
       setTxLink(null);
 
-      if (!window.ethereum) {
-        alert("Please install MetaMask (or another EVM wallet).");
+      if (!modal) {
+        setStatus("Wallet connector not initialized.");
+        return;
+      }
+
+      if (CONFIG.reownProjectId === "REOWN_PROJECT_ID") {
+        setStatus("Set CONFIG.reownProjectId first.");
         return;
       }
 
       try {
         el.connectBtn.disabled = true;
-        setStatus("Requesting wallet connection...");
-
-        await window.ethereum.request({ method: "eth_requestAccounts" });
-        provider = new ethers.BrowserProvider(window.ethereum);
-        signer = await provider.getSigner();
-
-        const address = await signer.getAddress();
-        el.walletAddress.textContent = address;
-        setConnectedUI(address);
-
-        setStatus("Connected: " + address);
-        await refreshChainUI();
-        await loadSchedules();
+        setStatus("Opening wallet modal...");
+        await modal.open();
       } catch (err) {
-        signer = undefined;
-        provider = undefined;
-        setConnectedUI(null);
         setStatus("Connect failed: " + normalizeError(err));
       } finally {
         el.connectBtn.disabled = false;
@@ -350,7 +422,6 @@
     }
 
     async function switchNetwork() {
-      if (!window.ethereum) return;
       if (CONFIG.requiredChainId === null || CONFIG.requiredChainId === undefined) {
         setStatus("No requiredChainId set in CONFIG.");
         return;
@@ -359,10 +430,9 @@
       try {
         el.switchBtn.disabled = true;
         setStatus("Switching network...");
-        await window.ethereum.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: "0x" + Number(CONFIG.requiredChainId).toString(16) }]
-        });
+        if (modal) {
+          await modal.switchNetwork(base);
+        }
         await refreshChainUI();
         setStatus("Network switched.");
       } catch (err) {
@@ -420,41 +490,73 @@
     el.claimBtn.addEventListener("click", claimToken);
     el.switchBtn.addEventListener("click", switchNetwork);
     el.refreshSchedulesBtn.addEventListener("click", loadSchedules);
-    el.scheduleSelect.addEventListener("change", async () => {
-      const selected = getSelectedScheduleId();
-      await loadVestingInfo(selected);
+    el.scheduleBtn.addEventListener("click", () => {
+      if (el.scheduleBtn.disabled) return;
+      renderScheduleList();
+      openScheduleModal();
     });
+    el.scheduleBackdrop.addEventListener("click", closeScheduleModal);
+    el.scheduleClose.addEventListener("click", closeScheduleModal);
 
-    if (window.ethereum) {
-      window.ethereum.on("accountsChanged", async () => {
-        signer = undefined;
-        provider = new ethers.BrowserProvider(window.ethereum);
-        try {
-          signer = await provider.getSigner();
-          const address = await signer.getAddress();
-          el.walletAddress.textContent = address;
-          setConnectedUI(address);
-          setStatus("Account changed: " + address);
-        } catch {
+    const metadata = {
+      name: "Claim TTN",
+      description: "Claim vesting tokens",
+      url: window.location.origin,
+      icons: ["https://avatars.githubusercontent.com/u/179229932"]
+    };
+
+    if (CONFIG.reownProjectId !== "REOWN_PROJECT_ID") {
+      modal = createAppKit({
+        adapters: [new EthersAdapter()],
+        networks: [base],
+        defaultNetwork: base,
+        metadata,
+        projectId: CONFIG.reownProjectId,
+        features: { analytics: true }
+      });
+
+      modal.subscribeProvider(async ({ provider: walletProvider, address, error, chainId, isConnected }) => {
+        if (error) {
+          setStatus("Wallet error: " + normalizeError(error));
+        }
+
+        if (!isConnected || !walletProvider || !address) {
+          provider = undefined;
+          signer = undefined;
           el.walletAddress.textContent = "-";
           setConnectedUI(null);
-          setStatus("Disconnected.");
+          scheduleIds = [];
+          selectedScheduleId = null;
+          setScheduleButtonLabel();
+          el.scheduleBtn.disabled = true;
+          el.refreshSchedulesBtn.disabled = true;
+          el.vestingInfo.textContent = "-";
+          el.claimBtn.disabled = true;
+          await refreshChainUI();
+          return;
         }
-        await refreshChainUI();
-        await loadSchedules();
-      });
 
-      window.ethereum.on("chainChanged", async () => {
-        provider = new ethers.BrowserProvider(window.ethereum);
         try {
+          provider = new ethers.BrowserProvider(walletProvider);
           signer = await provider.getSigner();
-        } catch {
+          el.walletAddress.textContent = address;
+          setConnectedUI(address);
+          el.networkBadge.textContent = "ChainId " + Number(chainId);
+          setStatus("Connected: " + address);
+          await refreshChainUI();
+          await loadSchedules();
+        } catch (e) {
+          provider = undefined;
           signer = undefined;
+          setConnectedUI(null);
+          setStatus("Provider init failed: " + normalizeError(e));
         }
-        await refreshChainUI();
-        await loadSchedules();
       });
+    } else {
+      setStatus("Set CONFIG.reownProjectId (Reown) to enable multi-wallet connect.");
     }
+
+    setScheduleButtonLabel();
   </script>
 </body>
 </html>
